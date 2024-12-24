@@ -16,6 +16,9 @@ mod input;
 mod output;
 
 fn main() {
+    env_logger::init();
+    log::info!("Starting");
+    
     let rt = Runtime::new().unwrap();
     let mut args = env::args();
     let _ = args.next();

@@ -1,9 +1,12 @@
 pub mod file_system;
 pub mod github;
+pub mod tokenizer;
 use async_trait::async_trait;
 use once_cell::sync::Lazy;
 use std::collections::HashSet;
 use thiserror::Error;
+
+pub use tokenizer::count_tokens_in_content;
 
 #[derive(Error, Debug)]
 pub enum TextSourceError {
@@ -50,6 +53,7 @@ impl Default for FilterConfig {
         }
     }
 }
+
 impl FilterConfig {
     pub fn new() -> Self {
         Self::default()

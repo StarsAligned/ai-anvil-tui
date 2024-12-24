@@ -207,6 +207,7 @@ impl App {
     }
 
     pub async fn update(&mut self, key_event: KeyEvent) {
+        log::info!("User command: {:?}", key_event);
         let old_focused_panel = self.focused_panel;
         match key_event.code {
             KeyCode::F(n) if n == 10 => {
