@@ -177,22 +177,22 @@ impl App {
     fn get_bottom_text(&self) -> String {
         match self.focused_panel {
             FocusedPanel::SourcePath =>
-                "enter - Filters  •  F1 - reload  •  F2 - merge  •  F3 - clear  •  F10/esc - close".to_string(),
+                "enter - focus Filters  •  F1 - reload  •  F2 - generate  •  F3 - clear  •  F10/esc - close".to_string(),
             FocusedPanel::Filters =>
-                "↑/↓ - navigate  •  space - (de)select  •  enter - Files  •  esc - Source  •  F1 - reload  •  F2 - generate  •  F10 - close".to_string(),
+                "↑/↓ - navigate  •  space - (de)select  •  enter - focus Files  •  esc - focus Source  •  F1 - reload  •  F2 - generate  •  F10 - close".to_string(),
             FocusedPanel::SourceFiles =>
-                "↑/↓ - navigate  •  space - (de)select  •  enter - focus Output & start counting  •  esc - Filters  •  F1 - reload  •  F2 - generate  •  F10 - close".to_string(),
+                "↑/↓ - navigate  •  space - (de)select  •  enter - count tokens & focus Output  •  esc - focus Filters  •  F1 - reload  •  F2 - generate  •  F10 - close".to_string(),
             FocusedPanel::Output => {
                 match self.output_panel.destination {
                     OutputDestination::File |
                     OutputDestination::FileAndClipboard =>
-                        "←/→ - toggle  •  enter - Output File  •  esc - Files  •  F1 - reload  •  F2 - generate  •  F10 - close".to_string(),
+                        "←/→ - toggle  •  enter - focus Output File  •  esc - focus Files  •  F1 - reload  •  F2 - generate  •  F10 - close".to_string(),
                     OutputDestination::Clipboard =>
-                        "←/→ - toggle  •  enter/F2 - merge  •  esc - Files  •  F1 - reload  •  F10 - close".to_string()
+                        "←/→ - toggle  •  enter/F2 - generate  •  esc - focus Files  •  F1 - reload  •  F10 - close".to_string()
                 }
             }
             FocusedPanel::OutputFile =>
-                "enter/F2 - merge  •  esc - Output  •  F1 - reload  •  F3 - clear  •  F10 - close".to_string()
+                "enter/F2 - generate  •  esc - focus Output  •  F1 - reload  •  F3 - clear  •  F10 - close".to_string()
         }
     }
 
