@@ -1,4 +1,5 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Alignment},
@@ -6,9 +7,11 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Clear},
     Frame,
 };
-use crate::input::{create_text_source, FilterConfig, SourceFile};
+use tokio::sync::mpsc;
+use crate::input::{create_text_source, FilterConfig, SourceFile, TextSource, count_tokens_in_content};
 use crate::output::{write_merged, clipboard::copy_clipboard};
 use crate::ui::output::{OutputDestination, OutputPanel};
+use crate::ui::source_files::{TokenStatus, SourceFilesPanel};
 
 pub mod source_path;
 pub mod filters;
@@ -61,7 +64,7 @@ impl FocusedPanel {
 pub struct App {
     pub source_path_panel: source_path::SourcePathPanel,
     pub filters_panel: filters::FiltersPanel,
-    pub source_files_panel: source_files::SourceFilesPanel,
+    pub source_files_panel: SourceFilesPanel,
     pub output_panel: OutputPanel,
     pub output_file_panel: output_file::OutputFilePanel,
     pub focused_panel: FocusedPanel,
@@ -70,19 +73,22 @@ pub struct App {
     pub selected_files: HashSet<String>,
     pub processing: bool,
     pub filter_config: FilterConfig,
-    pub text_source: Option<Box<dyn crate::input::TextSource>>,
+    pub text_source: Option<Arc<dyn TextSource>>,
     pub exit_requested: bool,
     pub reload_files_needed: bool,
     pub merge_needed: bool,
     pub prev_source_path: String,
+    pub token_count_tx: mpsc::UnboundedSender<(String, Result<usize, String>)>,
+    pub token_count_rx: mpsc::UnboundedReceiver<(String, Result<usize, String>)>,
 }
 
 impl App {
     pub fn new(default_path: String, default_output_path: String) -> Self {
+        let (tx, rx) = mpsc::unbounded_channel();
         Self {
             source_path_panel: source_path::SourcePathPanel::new(default_path.clone()),
             filters_panel: filters::FiltersPanel::new(),
-            source_files_panel: source_files::SourceFilesPanel::new(),
+            source_files_panel: SourceFilesPanel::new(),
             output_panel: OutputPanel::new(),
             output_file_panel: output_file::OutputFilePanel::new(default_output_path),
             focused_panel: FocusedPanel::SourcePath,
@@ -96,10 +102,13 @@ impl App {
             reload_files_needed: false,
             merge_needed: false,
             prev_source_path: default_path,
+            token_count_tx: tx,
+            token_count_rx: rx,
         }
     }
 
     pub fn draw(&mut self, f: &mut Frame) {
+        self.process_token_count_results();
         let show_output_file = self.output_panel.destination != OutputDestination::Clipboard;
         let mut row_constraints = vec![
             Constraint::Length(3),
@@ -133,12 +142,14 @@ impl App {
             self.focused_panel == FocusedPanel::Filters,
             &self.selected_extensions
         );
+
         self.source_files_panel.draw(
             f,
             mid[1],
             self.focused_panel == FocusedPanel::SourceFiles,
             &self.selected_files
         );
+
         self.output_panel.draw(
             f,
             main_chunks[2],
@@ -165,20 +176,23 @@ impl App {
 
     fn get_bottom_text(&self) -> String {
         match self.focused_panel {
-            FocusedPanel::SourcePath => "enter - Filters  •  F1 - reload  •  F2 - merge  •  F3 - clear  •  F10/esc - close".to_string(),
-            FocusedPanel::Filters => "↑/↓ - navigate  •  space - (de)select  •  enter - Files  •  esc - Source  •  F1 - reload  •  F2 - generate  •  F10 - close".to_string(),
-            FocusedPanel::SourceFiles => "↑/↓ - navigate  •  space - (de)select  •  enter - Output  •  esc - Filters  •  F1 - reload  •  F2 - generate  •  F10 - close".to_string(),
+            FocusedPanel::SourcePath =>
+                "enter - Filters  •  F1 - reload  •  F2 - merge  •  F3 - clear  •  F10/esc - close".to_string(),
+            FocusedPanel::Filters =>
+                "↑/↓ - navigate  •  space - (de)select  •  enter - Files  •  esc - Source  •  F1 - reload  •  F2 - generate  •  F10 - close".to_string(),
+            FocusedPanel::SourceFiles =>
+                "↑/↓ - navigate  •  space - (de)select  •  enter - focus Output & start counting  •  esc - Filters  •  F1 - reload  •  F2 - generate  •  F10 - close".to_string(),
             FocusedPanel::Output => {
                 match self.output_panel.destination {
-                    OutputDestination::File | OutputDestination::FileAndClipboard => {
-                        "←/→ - toggle  •  enter - Output File  •  esc - Files  •  F1 - reload  •  F2 - generate  •  F10 - close".to_string()
-                    }
-                    OutputDestination::Clipboard => {
+                    OutputDestination::File |
+                    OutputDestination::FileAndClipboard =>
+                        "←/→ - toggle  •  enter - Output File  •  esc - Files  •  F1 - reload  •  F2 - generate  •  F10 - close".to_string(),
+                    OutputDestination::Clipboard =>
                         "←/→ - toggle  •  enter/F2 - merge  •  esc - Files  •  F1 - reload  •  F10 - close".to_string()
-                    }
                 }
             }
-            FocusedPanel::OutputFile => "enter/F2 - merge  •  esc - Output  •  F1 - reload  •  F3 - clear  •  F10 - close".to_string()
+            FocusedPanel::OutputFile =>
+                "enter/F2 - merge  •  esc - Output  •  F1 - reload  •  F3 - clear  •  F10 - close".to_string()
         }
     }
 
@@ -207,7 +221,6 @@ impl App {
     }
 
     pub async fn update(&mut self, key_event: KeyEvent) {
-        log::info!("User command: {:?}", key_event);
         let old_focused_panel = self.focused_panel;
         match key_event.code {
             KeyCode::F(n) if n == 10 => {
@@ -297,6 +310,17 @@ impl App {
 
     async fn handle_enter(&mut self) {
         match self.focused_panel {
+            FocusedPanel::SourceFiles => {
+                // Step 1: move focus to Output
+                self.focused_panel = self.focused_panel.next_panel(self);
+
+                // Steps 2 & 3: update Files panel title to "counting" & set items to "..."
+                self.source_files_panel.update_title_counting();
+                self.start_token_count_for_selected_files();
+
+                // user can continue interacting with the UI now
+                self.set_cursor_to_end();
+            }
             FocusedPanel::Output => {
                 if self.output_panel.destination == OutputDestination::Clipboard {
                     if !self.processing {
@@ -324,7 +348,7 @@ impl App {
         let path = self.source_path_panel.value.clone();
         let ts_result = create_text_source(&path).await;
         if let Ok(ts) = ts_result {
-            self.text_source = Some(ts);
+            self.text_source = Some(Arc::from(ts));
             if let Some(ts2) = &self.text_source {
                 let index_res = ts2.get_file_index(&self.filter_config).await;
                 match index_res {
@@ -349,7 +373,7 @@ impl App {
 
     pub async fn merge_immediate(&mut self) {
         self.merge_needed = false;
-        let mut files_map = std::collections::HashMap::new();
+        let mut files_map = HashMap::new();
         for f in &self.loaded_files {
             if self.selected_files.contains(&f.path) {
                 files_map.insert(f.path.clone(), f.clone());
@@ -377,11 +401,55 @@ impl App {
         }
     }
 
-    pub async fn reload_file_content(&mut self, sf: &SourceFile) -> Result<String, String> {
+    pub async fn reload_file_content(&self, sf: &SourceFile) -> Result<String, String> {
         if let Some(ts) = &self.text_source {
-            ts.get_file_content(sf).await.map_err(|e| e.to_string())
+            match ts.get_file_content(sf).await {
+                Ok(c) => Ok(c),
+                Err(e) => Err(e.to_string()),
+            }
         } else {
             Err("No text source available".to_string())
         }
+    }
+
+    fn start_token_count_for_selected_files(&mut self) {
+        if self.text_source.is_none() {
+            return;
+        }
+        let ts_arc = Arc::clone(self.text_source.as_ref().unwrap());
+        for path in &self.selected_files {
+            if let Some(TokenStatus::NotCounted) = self.source_files_panel.file_token_status.get(path) {
+                self.source_files_panel.set_counting(path);
+                let p = path.clone();
+                let sf = self.loaded_files.iter().find(|f| f.path == *path).cloned();
+                if let Some(sf2) = sf {
+                    let tx = self.token_count_tx.clone();
+                    let ts_for_async = Arc::clone(&ts_arc);
+                    tokio::spawn(async move {
+                        log::info!("Starting token count for {}", p);
+                        let content_res = ts_for_async.get_file_content(&sf2).await;
+                        let final_res = match content_res {
+                            Ok(content) => {
+                                match count_tokens_in_content(&content) {
+                                    Ok(n) => Ok(n),
+                                    Err(e) => Err(e),
+                                }
+                            }
+                            Err(e) => Err(e.to_string()),
+                        };
+                        if let Err(e) = tx.send((p, final_res)) {
+                            log::error!("Error sending token count result: {}", e);
+                        }
+                    });
+                }
+            }
+        }
+    }
+
+    fn process_token_count_results(&mut self) {
+        while let Ok((path, result)) = self.token_count_rx.try_recv() {
+            self.source_files_panel.set_count_result(&path, result);
+        }
+        self.source_files_panel.update_title_sum(&self.selected_files);
     }
 }

@@ -4,13 +4,22 @@ use ratatui::{
     style::{Color, Style},
     widgets::{Block, Borders, ListItem},
 };
+use std::collections::{HashMap, HashSet};
 use crate::input::SourceFile;
-use std::collections::HashSet;
+
+pub enum TokenStatus {
+    NotCounted,
+    Counting,
+    Done(usize),
+    Error,
+}
 
 pub struct SourceFilesPanel {
     pub items: Vec<String>,
     pub cursor: usize,
     pub offset: usize,
+    pub file_token_status: HashMap<String, TokenStatus>,
+    pub panel_title: String,
 }
 
 impl SourceFilesPanel {
@@ -19,6 +28,8 @@ impl SourceFilesPanel {
             items: vec![],
             cursor: 0,
             offset: 0,
+            file_token_status: HashMap::new(),
+            panel_title: "Files".to_string(),
         }
     }
 
@@ -28,30 +39,37 @@ impl SourceFilesPanel {
         self.items = paths;
         for f in files {
             selected_files.insert(f.path.clone());
+            self.file_token_status.insert(f.path.clone(), TokenStatus::NotCounted);
         }
         self.cursor = 0;
         self.offset = 0;
+        self.panel_title = "Files".to_string();
     }
 
-    pub fn draw(
-        &self,
-        f: &mut ratatui::Frame,
-        area: Rect,
-        focused: bool,
-        selected_files: &HashSet<String>,
-    ) {
+    pub fn draw(&self, f: &mut ratatui::Frame, area: Rect, focused: bool, selected_files: &HashSet<String>) {
         let block_style = if focused {
             Style::default().fg(Color::LightBlue)
         } else {
             Style::default()
         };
         let block = Block::default()
-            .title("Files")
+            .title(self.panel_title.as_str())
             .borders(Borders::ALL)
             .style(block_style);
+
+        let max_path_len = self.items.iter().map(|p| p.len()).max().unwrap_or(0);
+
+        let mut status_map = HashMap::new();
+        for path in &self.items {
+            let status_str = self.get_status_string(path);
+            status_map.insert(path, status_str);
+        }
+        let max_status_len = status_map.values().map(|s| s.len()).max().unwrap_or(0);
+
         let visible_count = area.height.saturating_sub(2) as usize;
         let end = (self.offset + visible_count).min(self.items.len());
         let slice = &self.items[self.offset..end];
+
         let list_items: Vec<ListItem> = slice
             .iter()
             .enumerate()
@@ -62,17 +80,21 @@ impl SourceFilesPanel {
                 let prefix = if i == self.cursor { "> " } else { "  " };
                 let item_style = if focused && i == self.cursor {
                     Style::default().fg(Color::LightBlue)
+                } else if is_selected {
+                    Style::default().fg(Color::White)
                 } else {
-                    if is_selected {
-                        Style::default().fg(Color::White)
-                    } else {
-                        Style::default().fg(Color::DarkGray)
-                    }
+                    Style::default().fg(Color::DarkGray)
                 };
-                let line = format!("{}{} {}", prefix, icon, it);
+
+                let padded_path = format!("{:width$}", it, width = max_path_len);
+                let status_str = status_map[it].clone();
+                let right_aligned_status = format!("{:>width$}", status_str, width = max_status_len);
+
+                let line = format!("{}{} {}  {}", prefix, icon, padded_path, right_aligned_status);
                 ListItem::new(line).style(item_style)
             })
             .collect();
+
         let list = ratatui::widgets::List::new(list_items).block(block);
         f.render_widget(list, area);
     }
@@ -140,4 +162,73 @@ impl SourceFilesPanel {
             }
         }
     }
+
+    pub fn set_counting(&mut self, path: &str) {
+        self.file_token_status.insert(path.to_string(), TokenStatus::Counting);
+    }
+
+    pub fn set_count_result(&mut self, path: &str, result: Result<usize, String>) {
+        match result {
+            Ok(n) => {
+                self.file_token_status.insert(path.to_string(), TokenStatus::Done(n));
+            }
+            Err(_) => {
+                self.file_token_status.insert(path.to_string(), TokenStatus::Error);
+            }
+        }
+    }
+
+    pub fn update_title_counting(&mut self) {
+        self.panel_title = "Files (counting tokens)".to_string();
+    }
+
+    pub fn update_title_sum(&mut self, selected_files: &HashSet<String>) {
+        if let Some(sum) = self.maybe_compute_total_tokens(selected_files) {
+            self.panel_title = format!("Files ({} tokens)", format_number(sum));
+        }
+    }
+
+    fn maybe_compute_total_tokens(&self, selected_files: &HashSet<String>) -> Option<usize> {
+        for path in selected_files {
+            match self.file_token_status.get(path) {
+                Some(TokenStatus::NotCounted) | Some(TokenStatus::Counting) => return None,
+                _ => {}
+            }
+        }
+        let mut total = 0;
+        for path in selected_files {
+            if let Some(TokenStatus::Done(n)) = self.file_token_status.get(path) {
+                total += n;
+            }
+        }
+        Some(total)
+    }
+
+    fn get_status_string(&self, path: &str) -> String {
+        match self.file_token_status.get(path) {
+            Some(TokenStatus::Counting) => "...".to_owned(),
+            Some(TokenStatus::Done(n)) => format_token_count(*n),
+            Some(TokenStatus::Error) => "Error".to_owned(),
+            _ => "".to_owned(),
+        }
+    }
+}
+
+fn format_token_count(n: usize) -> String {
+    let s = format_number(n);
+    format!("{} tokens", s)
+}
+
+fn format_number(n: usize) -> String {
+    let s = n.to_string();
+    let mut result = String::new();
+    let mut count = 0;
+    for c in s.chars().rev() {
+        if count > 0 && count % 3 == 0 {
+            result.insert(0, ' ');
+        }
+        result.insert(0, c);
+        count += 1;
+    }
+    result
 }

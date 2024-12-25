@@ -4,7 +4,7 @@ use std::time::Duration;
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen, SetTitle},
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
@@ -15,10 +15,18 @@ mod ui;
 mod input;
 mod output;
 
+fn set_window_title(title: &str) -> Result<(), Box<dyn std::error::Error>> {
+    execute!(std::io::stdout(), SetTitle(title))?;
+    Ok(())
+}
+
 fn main() {
     env_logger::init();
-    log::info!("Starting");
-    
+
+    if let Err(e) = set_window_title("AI Anvil") {
+        log::error!("Could not set title: {}", e);
+    }
+
     let rt = Runtime::new().unwrap();
     let mut args = env::args();
     let _ = args.next();
@@ -38,11 +46,13 @@ fn main() {
     rt.block_on(async {
         let mut app = App::new(default_path, default_output_path);
         app.reload_files_needed = true;
+
         enable_raw_mode().unwrap();
         let mut stdout = std::io::stdout();
         execute!(stdout, EnterAlternateScreen, EnableMouseCapture).unwrap();
         let backend = CrosstermBackend::new(stdout);
         let mut terminal = Terminal::new(backend).unwrap();
+
         loop {
             if app.reload_files_needed && !app.processing {
                 app.processing = true;
@@ -50,16 +60,19 @@ fn main() {
                 app.reload_files_immediate().await;
                 app.processing = false;
             }
+
             if app.merge_needed && !app.processing {
                 app.processing = true;
                 terminal.draw(|f| app.draw(f)).unwrap();
                 app.merge_immediate().await;
                 app.processing = false;
             }
+
             terminal.draw(|f| app.draw(f)).unwrap();
             if app.exit_requested {
                 break;
             }
+
             if event::poll(Duration::from_millis(50)).unwrap() {
                 match event::read().unwrap() {
                     Event::Key(key_event) if key_event.kind == KeyEventKind::Press => {
@@ -69,6 +82,7 @@ fn main() {
                 }
             }
         }
+
         disable_raw_mode().unwrap();
         execute!(
             terminal.backend_mut(),
